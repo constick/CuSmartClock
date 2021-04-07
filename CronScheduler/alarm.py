@@ -1,19 +1,41 @@
-from flask import Flask, render_template, redirect, flash, url_for, session
+from flask import Flask, render_template, redirect, flash, url_for, session, Response, request
 from flask_wtf import FlaskForm
 from wtforms import StringField, SubmitField
 from crontab import CronTab
+from scipy.spatial.distance import cdist
+import numpy as np
 import datetime
+import time
+from imutils.video import VideoStream
+import imutils
+import cv2
+# for random student
+import random
+import string
+from faceDetectorAndAlignment import faceDetectorAndAlignment
+from faceEmbeddingExtractor import faceEmbeddingExtractor
+import requests
+import json
 
 app = Flask(__name__)
 
 app.config['SECRET_KEY'] = 'tempKey'
 
 cron = CronTab(user='root')
+# inputStream = VideoStream(src=0).start()
+inputStream = cv2.VideoCapture(0)
+detector = faceDetectorAndAlignment('models/faceDetector.onnx', processScale=0.5)
+embeddingExtractor = faceEmbeddingExtractor('models/r100-fast-dynamic.onnx')
+
+
 
 class setupForm(FlaskForm):
 	date = StringField('Date: ')
 	starttime = StringField('Begin: ')
 	endtime = StringField('End: ')
+	submit = SubmitField('Submit')
+
+class setupFormSubmit(FlaskForm):
 	submit = SubmitField('Submit')
 
 def validatetime(hour, minute, endhour, endminute, day, month):
@@ -88,8 +110,22 @@ def writetime(hour, minute, endhour, endminute, day, month, n):
 	job.month.on(month)
 	cron.write()
 
-@app.route('/', methods=['GET','POST'])
+@app.route('/', methods=['POST', 'GET'])
 def index():
+	if request.method == 'POST':
+		room = request.form['room']
+		#TODO redirects to ห้อง 
+		# return redirect('http://www.google.com')
+		return redirect(url_for('choose_action', room=room))
+	else:
+		return render_template('main.html')
+
+@app.route('/choose_action_<room>')
+def choose_action(room):
+	return  render_template('choose_action.html', room=room)
+
+@app.route('/clock', methods=['GET','POST'])
+def set_clock():
 	form = setupForm()
 	
 	tabledata = list()
@@ -118,10 +154,127 @@ def index():
 		writetime(beginhour, beginminute, endhour, endminute, day, month, -1)
 		writetime(beginhour, beginminute, endhour, endminute, day, month, -10)
 		
-		return redirect(url_for('index'))
+		return redirect(url_for('set_clock'))
 		
-	return render_template('main.html', form=form, data=tabledata)
+	return render_template('clock.html', form=form, data=tabledata)
 
+def gen():
+    while True:
+        isFrameOK, inputFrame = inputStream.read()
+        frame = imutils.resize(inputFrame,width=800)
+        (flag, encoedImage) = cv2.imencode(".jpg",frame)
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + bytearray(encoedImage) + b'\r\n')
+
+@app.route('/room<room>/course<course>/live', methods=['POST', 'GET'])
+def live(room, course):
+	students = list()
+	if request.method == 'POST':
+		if request.form['button'] == 'check':
+			faces = np.load('./storeEmbedding/embedding.npy', allow_pickle=True)
+			if (faces.size!=0):
+				name = np.load('./storeEmbedding/name.npy', allow_pickle=True)
+				ids = np.load('./storeEmbedding/id.npy', allow_pickle=True)
+
+				
+				faces = faces.reshape((name.shape[0],512))
+				isFrameOK, inputFrame = inputStream.read()
+				### save name owner
+				if isFrameOK:
+					
+					faceBoxes, faceLandmarks, alignedFaces = detector.detect(inputFrame)
+					if len(faceBoxes) > 0:
+						student = dict()
+						### Extract embedding ###
+						extractEmbedding = embeddingExtractor.extract(alignedFaces)
+						# Compare embedding
+						distance = cdist(faces, extractEmbedding)
+						distance = distance.reshape(distance.shape[1],distance.shape[0])
+						### Draw face ##
+						for faceIdx, faceBox in enumerate(faceBoxes):
+							### find min distance
+							dis_face = distance[faceIdx]
+							# print(dis_face)
+							if np.min(dis_face) < 0.9:
+								student['id'] = ids[np.where(dis_face == np.min(dis_face))[0]][0]
+								student['name'] = name[np.where(dis_face == np.min(dis_face))[0]][0]
+								students.append(student)
+
+
+		elif request.form['button'] == 'clear':
+			faces = np.load('./storeEmbedding/embedding.npy', allow_pickle=True)
+			print('mickey')
+			print(faces.size)
+			
+			students.clear()
+		elif request.form['butotn'] == 'back' :
+			redirect(url_for('course', room=room))
+
+	return render_template('live_stream.html', room=room, course=course, students=students)
+
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/room<room>/choose_course', methods=['POST', 'GET'])
+def course(room):
+	if request.method == 'POST':
+		count = True
+		course = request.form['course']
+		#TODO ใส่courseให้ถูก
+		url = 'https://face-senior.herokuapp.com/fetchStudent'
+
+		payload = {'course_id' : course}
+
+		res = requests.post(url, json=payload, allow_redirects=True)
+		result = json.loads(res.content)
+		if (result['course'] == 'not found this course'):
+			print('abc')
+			embed = []
+			names = []
+			ids = []
+
+			np.save('./storeEmbedding/embedding.npy', np.array([]))
+			np.save('./storeEmbedding/name.npy', np.array([]))
+			np.save('./storeEmbedding/id.npy', np.array([]))
+
+		else :
+			print('def')
+			for student in result['student']:
+				print(student['student_name'])
+				if count :
+					embed = []
+					names = []
+					ids = []
+					np.save('./storeEmbedding/embedding.npy', np.array([]))
+					np.save('./storeEmbedding/name.npy', np.array([]))
+					np.save('./storeEmbedding/id.npy', np.array([]))
+
+				else:
+					embed = np.load('./storeEmbedding/embedding.npy', allow_pickle=True)         
+					names = np.load('./storeEmbedding/name.npy', allow_pickle=True)
+					ids = np.load('./storeEmbedding/id.npy', allow_pickle=True)
+
+				embed = np.append(embed, [student['embedded_face']])
+				np.save('./storeEmbedding/embedding.npy', embed)
+
+				names = np.append(names, [student['student_name']])
+				np.save('./storeEmbedding/name.npy', names)
+
+				ids = np.append(ids, [student['student_id']])
+				np.save('./storeEmbedding/id.npy', ids) 
+
+				count = False
+		return redirect(url_for('live', room=room, course=course))
+	else:
+		url = 'https://face-senior.herokuapp.com/fetchCourse'
+
+
+		res = requests.get(url, allow_redirects=True)
+		result = json.loads(res.content)
+		
+		return render_template('choose_course.html', courses=result['courses'])
+	
 if __name__ == '__main__':
-	app.run(port=80, host='0.0.0.0')
+	app.run(debug=True, port=80, host='0.0.0.0')
 

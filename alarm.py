@@ -88,7 +88,7 @@ def writetime(hour, minute, endhour, endminute, day, month, n):
 	job.month.on(month)
 	cron.write()
 
-@app.route('/', methods=['GET','POST'])
+@app.route('/clock', methods=['GET','POST'])
 def index():
 	form = setupForm()
 	
